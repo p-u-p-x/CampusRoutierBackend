@@ -2,7 +2,6 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 import models
 import schemas
-import auth
 from auth import get_db, require_student
 from datetime import date, datetime
 import logging
