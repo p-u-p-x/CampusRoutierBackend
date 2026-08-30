@@ -38,7 +38,7 @@ class Student(Base):
     request_date = Column(Date, nullable=True)
     van_id = Column(Integer, ForeignKey("vans.id"), nullable=True)
 
-    user = relationship("User", back_populates="student", foreign_keys=[student_id])
+    user = relationship("User", back_populates="student", foreign_keys="User.student_id")
     pickup_window = relationship("PickupWindow", foreign_keys=[pickup_window_id])
     drop_window = relationship("DropWindow", foreign_keys=[drop_window_id])
     van = relationship("Van", foreign_keys=[van_id])
