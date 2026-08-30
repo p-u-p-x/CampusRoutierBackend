@@ -28,6 +28,24 @@ def my_van(
     return {"van_id": van.id, "van_name": van.name, "capacity": van.capacity}
 
 
+@router.post("/update-location", response_model=schemas.MessageResponse)
+def update_location(
+    location: schemas.LocationUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_driver)
+):
+    """
+    Called periodically (every 5-10s) by the driver's phone while the app is
+    open, so students can see the van moving on their live map.
+    """
+    van = get_driver_van(current_user.id, db)
+    van.current_lat = location.latitude
+    van.current_lng = location.longitude
+    van.location_updated_at = datetime.utcnow()
+    db.commit()
+    return {"message": "Location updated"}
+
+
 @router.get("/pickup-list", response_model=list[schemas.DriverPickupStudent])
 def pickup_list(
     db: Session = Depends(get_db),

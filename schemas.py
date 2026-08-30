@@ -222,3 +222,16 @@ class VanUtilization(BaseModel):
 class AssignmentResult(BaseModel):
     assigned_count: int
     vans_utilization: List[VanUtilization]
+
+
+# ---------- Live location ----------
+class LocationUpdate(BaseModel):
+    latitude: float
+    longitude: float
+
+
+class VanLocationResponse(BaseModel):
+    van_id: int
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    updated_at: Optional[datetime] = None
