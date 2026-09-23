@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Date, Time, Float
 from sqlalchemy.orm import relationship
-from datetime import datetime
+from datetime import datetime, date
 from database import Base
 
 
@@ -38,11 +38,17 @@ class Student(Base):
     request_date = Column(Date, nullable=True)
     van_id = Column(Integer, ForeignKey("vans.id"), nullable=True)
 
+    # New: which specific van trip this student actually landed on today
+    pickup_trip_id = Column(Integer, ForeignKey("trips.id"), nullable=True)
+    drop_trip_id = Column(Integer, ForeignKey("trips.id"), nullable=True)
+
     user = relationship("User", back_populates="student", foreign_keys="User.student_id")
     pickup_window = relationship("PickupWindow", foreign_keys=[pickup_window_id])
     drop_window = relationship("DropWindow", foreign_keys=[drop_window_id])
     van = relationship("Van", foreign_keys=[van_id])
     assignments = relationship("Assignment", back_populates="student")
+    pickup_trip = relationship("Trip", foreign_keys=[pickup_trip_id])
+    drop_trip = relationship("Trip", foreign_keys=[drop_trip_id])
 
 
 class Van(Base):
@@ -111,3 +117,26 @@ class SystemSetting(Base):
     id = Column(Integer, primary_key=True, index=True)
     key = Column(String, unique=True, nullable=False)
     value = Column(String, nullable=True)
+
+
+class Trip(Base):
+    """
+    One specific run: one van, one date, one direction (pickup or drop),
+    at one scheduled time. Lets a single van make several separate pickup
+    and drop runs in the same day, each tracked and capacity checked on its own.
+    """
+    __tablename__ = "trips"
+
+    id = Column(Integer, primary_key=True, index=True)
+    van_id = Column(Integer, ForeignKey("vans.id"), nullable=False)
+    trip_date = Column(Date, nullable=False, default=date.today)
+    trip_type = Column(String, nullable=False)  # "pickup" or "drop"
+    pickup_window_id = Column(Integer, ForeignKey("pickup_windows.id"), nullable=True)
+    drop_window_id = Column(Integer, ForeignKey("drop_windows.id"), nullable=True)
+    status = Column(String, default="scheduled")  # scheduled, in_progress, completed
+    started_at = Column(DateTime, nullable=True)
+    arrived_at = Column(DateTime, nullable=True)
+
+    van = relationship("Van", foreign_keys=[van_id])
+    pickup_window = relationship("PickupWindow", foreign_keys=[pickup_window_id])
+    drop_window = relationship("DropWindow", foreign_keys=[drop_window_id])

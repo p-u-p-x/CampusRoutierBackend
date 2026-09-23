@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from collections import defaultdict
 import models
 import schemas
@@ -11,6 +12,40 @@ from datetime import date
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
+
+
+def _ensure_todays_trips(db: Session):
+    """
+    Makes sure every active van has a trip row for every enabled window,
+    for today. This is what makes trips 'happen automatically': nobody
+    has to manually create them, they just exist whenever needed. A trip
+    that ends up with 0 students is simply never started by its driver,
+    so it costs nothing to have on the books.
+    """
+    today = date.today()
+    vans = db.query(models.Van).filter(models.Van.is_active == True).all()
+    pickup_windows = db.query(models.PickupWindow).filter(models.PickupWindow.enabled == True).all()
+    drop_windows = db.query(models.DropWindow).filter(models.DropWindow.enabled == True).all()
+
+    existing = db.query(models.Trip).filter(models.Trip.trip_date == today).all()
+    existing_keys = {
+        (t.van_id, t.trip_type, t.pickup_window_id, t.drop_window_id) for t in existing
+    }
+
+    created_any = False
+    for van in vans:
+        for pw in pickup_windows:
+            key = (van.id, "pickup", pw.id, None)
+            if key not in existing_keys:
+                db.add(models.Trip(van_id=van.id, trip_date=today, trip_type="pickup", pickup_window_id=pw.id))
+                created_any = True
+        for dw in drop_windows:
+            key = (van.id, "drop", None, dw.id)
+            if key not in existing_keys:
+                db.add(models.Trip(van_id=van.id, trip_date=today, trip_type="drop", drop_window_id=dw.id))
+                created_any = True
+    if created_any:
+        db.commit()
 
 
 @router.get("/dashboard", response_model=schemas.DashboardResponse)
@@ -34,79 +69,122 @@ def admin_dashboard(
     }
 
 
+def _assign_side(db: Session, trip_type: str):
+    """
+    Handles either the pickup side or the drop side of assignment.
+    For every window of this type that has requested students, groups
+    those students by area, and fills them into whichever of today's
+    trips for that window belong to a van serving that area — never
+    exceeding that trip's own 11 seat capacity, and never touching a
+    student who already has a trip on this side (safe to re-run).
+    """
+    today = date.today()
+    trip_id_field = models.Student.pickup_trip_id if trip_type == "pickup" else models.Student.drop_trip_id
+    window_id_field = models.Student.pickup_window_id if trip_type == "pickup" else models.Student.drop_window_id
+    trip_window_filter_field = models.Trip.pickup_window_id if trip_type == "pickup" else models.Trip.drop_window_id
+
+    students = db.query(models.Student).filter(
+        models.Student.status == "requested",
+        models.Student.request_date == today,
+        trip_id_field.is_(None),
+    ).all()
+
+    by_window_area = defaultdict(lambda: defaultdict(list))
+    for s in students:
+        window_id = s.pickup_window_id if trip_type == "pickup" else s.drop_window_id
+        if window_id:
+            by_window_area[window_id][s.area].append(s)
+
+    assigned_count = 0
+
+    for window_id, areas_dict in by_window_area.items():
+        trips_this_window = db.query(models.Trip).filter(
+            models.Trip.trip_date == today,
+            models.Trip.trip_type == trip_type,
+            trip_window_filter_field == window_id,
+        ).all()
+
+        # current occupancy per trip = students already using that trip
+        trip_load = {}
+        for trip in trips_this_window:
+            trip_load[trip.id] = db.query(func.count(models.Student.id)).filter(
+                trip_id_field == trip.id
+            ).scalar()
+
+        for area, area_students in areas_dict.items():
+            area_trips = [t for t in trips_this_window if area.strip() in [a.strip() for a in t.van.areas.split(",")]]
+            if not area_trips:
+                logger.warning(f"No van serves area {area} for {trip_type} window {window_id}")
+                continue
+            area_trips.sort(key=lambda t: trip_load[t.id])
+
+            for student in area_students:
+                best_trip = None
+                for t in area_trips:
+                    if trip_load[t.id] < t.van.capacity:
+                        best_trip = t
+                        break
+                if not best_trip:
+                    break  # no capacity left for this area in this window
+
+                trip_load[best_trip.id] += 1
+                if trip_type == "pickup":
+                    student.pickup_trip_id = best_trip.id
+                    student.van_id = best_trip.van_id
+                    student.pickup_order = trip_load[best_trip.id]
+                else:
+                    student.drop_trip_id = best_trip.id
+
+                assigned_count += 1
+                area_trips.sort(key=lambda t: trip_load[t.id])
+
+    return assigned_count
+
+
 @router.post("/run-assignment", response_model=schemas.AssignmentResult)
 def run_assignment(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_admin)
 ):
-    # Get students with status requested
-    students = db.query(models.Student).filter(models.Student.status == "requested").all()
-    if not students:
-        return {"assigned_count": 0, "vans_utilization": []}
+    _ensure_todays_trips(db)
 
-    # Group by pickup window, then by area
-    by_window_area = defaultdict(lambda: defaultdict(list))
+    pickup_assigned = _assign_side(db, "pickup")
+    db.commit()
+    drop_assigned = _assign_side(db, "drop")
+    db.commit()
+
+    # A student is fully "assigned" only once they have both a pickup
+    # trip and a drop trip. Otherwise they stay "requested" so the
+    # admin can see who's still waiting on capacity.
+    today = date.today()
+    students = db.query(models.Student).filter(
+        models.Student.status == "requested",
+        models.Student.request_date == today,
+    ).all()
+    fully_assigned = 0
     for s in students:
-        by_window_area[s.pickup_window_id][s.area].append(s)
+        if s.pickup_trip_id and s.drop_trip_id:
+            s.status = "assigned"
+            fully_assigned += 1
+    db.commit()
 
-    # Get active vans
+    # Utilization, per van, across today's trips of both types
+    today_trips = db.query(models.Trip).filter(models.Trip.trip_date == today).all()
+    van_used = defaultdict(int)
+    for trip in today_trips:
+        count = db.query(func.count(models.Student.id)).filter(
+            (models.Student.pickup_trip_id == trip.id) | (models.Student.drop_trip_id == trip.id)
+        ).scalar()
+        van_used[trip.van_id] += count
+
     vans = db.query(models.Van).filter(models.Van.is_active == True).all()
-    if not vans:
-        raise HTTPException(status_code=400, detail="No active vans available")
-
-    # Track van loads
-    van_load = {v.id: 0 for v in vans}
-    # Map area to vans
-    vans_by_area = defaultdict(list)
-    for v in vans:
-        for a in v.areas.split(","):
-            vans_by_area[a.strip()].append(v)
-
-    # Clear previous assignments and reset status for previously assigned students
-    db.query(models.Assignment).delete()
-    for s in db.query(models.Student).filter(models.Student.status == "assigned").all():
-        s.status = "requested"
-        s.pickup_order = None
-        s.van_id = None
-    db.commit()
-
-    assigned_count = 0
-    # Process each pickup window separately
-    for window_id, areas_dict in by_window_area.items():
-        for area, area_students in areas_dict.items():
-            available_vans = vans_by_area.get(area, [])
-            if not available_vans:
-                logger.warning(f"No van serves area {area} for window {window_id}")
-                continue
-            # Sort vans by current load
-            available_vans.sort(key=lambda v: van_load[v.id])
-            for student in area_students:
-                # Find van with capacity
-                best_van = None
-                for v in available_vans:
-                    if van_load[v.id] < v.capacity:
-                        best_van = v
-                        break
-                if not best_van:
-                    break  # no capacity left for this area in this window
-                van_load[best_van.id] += 1
-                student.status = "assigned"
-                student.pickup_order = van_load[best_van.id]
-                student.van_id = best_van.id
-                assignment = models.Assignment(student_id=student.id, van_id=best_van.id)
-                db.add(assignment)
-                assigned_count += 1
-                # re-sort vans
-                available_vans.sort(key=lambda v: van_load[v.id])
-
-    db.commit()
-
-    # Build utilization
     utilization = [
-        schemas.VanUtilization(van_name=v.name, used=van_load[v.id], capacity=v.capacity)
+        schemas.VanUtilization(van_name=v.name, used=van_used[v.id], capacity=v.capacity)
         for v in vans
     ]
-    return {"assigned_count": assigned_count, "vans_utilization": utilization}
+
+    logger.info(f"Assignment run: {pickup_assigned} pickup, {drop_assigned} drop, {fully_assigned} fully assigned")
+    return {"assigned_count": fully_assigned, "vans_utilization": utilization}
 
 
 @router.post("/reset-day", response_model=schemas.MessageResponse)
@@ -114,17 +192,20 @@ def reset_day(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_admin)
 ):
-    # Reset all students
+    today = date.today()
     students = db.query(models.Student).all()
     for s in students:
         s.status = "waiting"
         s.pickup_order = None
         s.pickup_window_id = None
         s.drop_window_id = None
+        s.pickup_trip_id = None
+        s.drop_trip_id = None
         s.request_date = None
         s.van_id = None
     db.query(models.Assignment).delete()
     db.query(models.DailyRoute).delete()
+    db.query(models.Trip).filter(models.Trip.trip_date == today).delete()
     db.commit()
     logger.info(f"Admin {current_user.id} reset day")
     return {"message": "Day reset complete"}

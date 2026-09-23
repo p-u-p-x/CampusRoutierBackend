@@ -36,3 +36,8 @@ app.include_router(system.router)
 @app.get("/")
 def root():
     return {"message": "Campus Routier Running"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

@@ -1,6 +1,9 @@
 import os
+from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
+
+load_dotenv()  # reads .env into the environment before anything below runs
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./campus_routier.db")
 

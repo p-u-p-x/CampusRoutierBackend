@@ -186,24 +186,26 @@ class DriverVanResponse(BaseModel):
     capacity: int
 
 
-class DriverPickupStudent(BaseModel):
+class TripResponse(BaseModel):
+    id: int
+    trip_type: str  # "pickup" or "drop"
+    window_start: Optional[str] = None
+    window_end: Optional[str] = None
+    status: str  # scheduled, in_progress, completed
+    student_count: int
+    started_at: Optional[datetime] = None
+    arrived_at: Optional[datetime] = None
+
+
+class DriverTripStudent(BaseModel):
     student_id: int
     name: str
     area: str
-    pickup_order: int
+    pickup_order: Optional[int] = None
     status: str
-    pickup_window: Optional[str] = None
-    drop_window: Optional[str] = None
     pickup_address: Optional[str] = None
+    drop_address: Optional[str] = None
     class_slot: Optional[str] = None
-
-
-class StartPickupRouteRequest(BaseModel):
-    pickup_start_time: str  # "HH:MM" 24-hour
-
-
-class StartDropRouteRequest(BaseModel):
-    drop_start_time: str
 
 
 # ---------- Daily Route ----------

@@ -11,12 +11,12 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 @router.post("/register", response_model=schemas.UserResponse)
 def register(user_data: schemas.StudentCreate, db: Session = Depends(auth.get_db)):
-    # Check if username or email exists
+    # Check if roll number or email already has an account
     existing = db.query(models.User).filter(
-        (models.User.username == user_data.username) | (models.User.email == user_data.email)
+        (models.User.username == user_data.roll_number) | (models.User.email == user_data.email)
     ).first()
     if existing:
-        raise HTTPException(status_code=400, detail="Username or email already registered")
+        raise HTTPException(status_code=400, detail="Roll number or email already registered")
 
     # Validate area
     allowed_areas = ["DHA", "Walton", "Ali Park", "Punjab Society", "Cavalry", "Bhata Chowk"]

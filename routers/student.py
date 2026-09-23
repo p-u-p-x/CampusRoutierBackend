@@ -17,10 +17,6 @@ def van_location(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_student)
 ):
-    """
-    Polled every 5-10s by the student's app (once they have a van assigned)
-    to show the van's last-reported position on the live map.
-    """
     student = db.query(models.Student).filter(models.Student.id == current_user.student_id).first()
     if not student or not student.van_id:
         raise HTTPException(status_code=404, detail="No van assigned yet")
@@ -53,6 +49,19 @@ def get_drop_windows(
     return windows
 
 
+def _window_has_passed(window_start_time: str) -> bool:
+    """
+    A window's cutoff is its own start time, today.
+    NOTE: this compares against the server's local clock. Once deployed,
+    this needs to compare against Pakistan time specifically, flagged
+    for Stage 5 (deployment) so it isn't silently wrong once hosted.
+    """
+    today = date.today()
+    hour, minute = map(int, window_start_time.split(":"))
+    window_dt = datetime.combine(today, datetime.min.time()).replace(hour=hour, minute=minute)
+    return datetime.now() >= window_dt
+
+
 @router.post("/request_transport", response_model=schemas.MessageResponse)
 def request_transport(
     request_data: schemas.StudentRequest,
@@ -77,6 +86,8 @@ def request_transport(
     ).first()
     if not pickup_window:
         raise HTTPException(status_code=400, detail="Invalid or disabled pickup window")
+    if _window_has_passed(pickup_window.start_time):
+        raise HTTPException(status_code=400, detail="That pickup time has already started, choose a later one")
 
     drop_window = db.query(models.DropWindow).filter(
         models.DropWindow.id == request_data.drop_window_id,
@@ -84,14 +95,21 @@ def request_transport(
     ).first()
     if not drop_window:
         raise HTTPException(status_code=400, detail="Invalid or disabled drop window")
+    if _window_has_passed(drop_window.start_time):
+        raise HTTPException(status_code=400, detail="That drop time has already started, choose a later one")
 
+    # Just record what the student wants. The admin's automatic
+    # assignment step (Stage 2c) is what actually puts them on a van.
     student.pickup_window_id = request_data.pickup_window_id
     student.drop_window_id = request_data.drop_window_id
+    student.pickup_trip_id = None
+    student.drop_trip_id = None
+    student.van_id = None
     student.status = "requested"
     student.request_date = today
     db.commit()
 
-    logger.info(f"Student {student.id} requested transport")
+    logger.info(f"Student {student.id} requested pickup window {pickup_window.id}, drop window {drop_window.id}")
     return {"message": "Transport request submitted successfully"}
 
 
@@ -153,21 +171,14 @@ def today_route(
     student = db.query(models.Student).filter(models.Student.id == current_user.student_id).first()
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
-    if not student.van_id:
-        return {"pickup_start_time": None, "drop_start_time": None}
-    today = date.today()
-    route = db.query(models.DailyRoute).filter(
-        models.DailyRoute.date == today,
-        models.DailyRoute.van_id == student.van_id
-    ).first()
-    if not route:
-        return {"pickup_start_time": None, "drop_start_time": None}
+
     pickup_str = None
-    if route.pickup_start_time:
-        pickup_str = route.pickup_start_time.strftime("%I:%M %p").lstrip("0")
+    if student.pickup_trip and student.pickup_trip.pickup_window:
+        pickup_str = student.pickup_trip.pickup_window.start_time
     drop_str = None
-    if route.drop_start_time:
-        drop_str = route.drop_start_time.strftime("%I:%M %p").lstrip("0")
+    if student.drop_trip and student.drop_trip.drop_window:
+        drop_str = student.drop_trip.drop_window.start_time
+
     return {"pickup_start_time": pickup_str, "drop_start_time": drop_str}
 
 
