@@ -7,10 +7,13 @@ import auth
 from auth import get_db, require_driver
 from datetime import datetime, date
 import logging
+import math
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/driver", tags=["Driver"])
+
+MOVEMENT_THRESHOLD_METERS = 100
 
 
 def get_driver_van(driver_id: int, db: Session) -> models.Van:
@@ -30,6 +33,83 @@ def get_trip_for_van(trip_id: int, van_id: int, db: Session) -> models.Trip:
     return trip
 
 
+def _log_event(db: Session, van: models.Van, trip_id: int, event_type: str, student_id: int = None):
+    """Every important thing that happens gets one permanent row here,
+    tagged with the van's last known GPS position at that moment."""
+    event = models.StopEvent(
+        trip_id=trip_id,
+        student_id=student_id,
+        event_type=event_type,
+        latitude=van.current_lat,
+        longitude=van.current_lng,
+    )
+    db.add(event)
+
+
+def _distance_meters(lat1, lon1, lat2, lon2) -> float:
+    """Straight-line distance between two GPS points, in meters."""
+    R = 6371000  # Earth's radius in meters
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return 2 * R * math.asin(math.sqrt(a))
+
+
+def _window_time_passed(window_start_time: str) -> bool:
+    today = date.today()
+    hour, minute = map(int, window_start_time.split(":"))
+    window_dt = datetime.combine(today, datetime.min.time()).replace(hour=hour, minute=minute)
+    return datetime.now() >= window_dt
+
+
+def _maybe_auto_start_trip(db: Session, van: models.Van, prev_lat, prev_lng, new_lat, new_lng):
+    """
+    If the van has no trip in progress right now, and it has moved more
+    than MOVEMENT_THRESHOLD_METERS since its last reported position, and
+    today's next scheduled trip's window has already begun, automatically
+    mark that trip started. This is the 'trip starts when the van actually
+    starts moving' behavior, no button press needed.
+    """
+    already_in_progress = db.query(models.Trip).filter(
+        models.Trip.van_id == van.id,
+        models.Trip.status == "in_progress",
+    ).first()
+    if already_in_progress:
+        return
+
+    if prev_lat is None or prev_lng is None:
+        return  # first ever location report for this van, nothing to compare against
+
+    moved = _distance_meters(prev_lat, prev_lng, new_lat, new_lng)
+    if moved < MOVEMENT_THRESHOLD_METERS:
+        return
+
+    today = date.today()
+    candidates = db.query(models.Trip).filter(
+        models.Trip.van_id == van.id,
+        models.Trip.trip_date == today,
+        models.Trip.status == "scheduled",
+    ).all()
+
+    due_now = []
+    for t in candidates:
+        window = t.pickup_window if t.trip_type == "pickup" else t.drop_window
+        if window and _window_time_passed(window.start_time):
+            due_now.append((window.start_time, t))
+
+    if not due_now:
+        return
+
+    due_now.sort(key=lambda x: x[0])
+    _, trip_to_start = due_now[0]
+
+    trip_to_start.status = "in_progress"
+    trip_to_start.started_at = datetime.utcnow()
+    _log_event(db, van, trip_to_start.id, "trip_started")
+    logger.info(f"Auto-started trip {trip_to_start.id} for van {van.id} after {moved:.0f}m of movement")
+
+
 @router.get("/my-van", response_model=schemas.DriverVanResponse)
 def my_van(
     db: Session = Depends(get_db),
@@ -45,14 +125,15 @@ def update_location(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_driver)
 ):
-    """
-    Called periodically (every 5-10s) by the driver's phone while the app is
-    open, so students can see the van moving on their live map.
-    """
     van = get_driver_van(current_user.id, db)
+    prev_lat, prev_lng = van.current_lat, van.current_lng
+
     van.current_lat = location.latitude
     van.current_lng = location.longitude
     van.location_updated_at = datetime.utcnow()
+
+    _maybe_auto_start_trip(db, van, prev_lat, prev_lng, location.latitude, location.longitude)
+
     db.commit()
     return {"message": "Location updated"}
 
@@ -62,11 +143,6 @@ def my_trips_today(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_driver)
 ):
-    """
-    Everything this driver's van is scheduled to run today, pickup and
-    drop, in order. A trip with 0 students is still shown, the driver
-    simply has nothing to do on it and can skip starting it.
-    """
     van = get_driver_van(current_user.id, db)
     today = date.today()
     trips = db.query(models.Trip).filter(
@@ -98,7 +174,6 @@ def my_trips_today(
             "arrived_at": t.arrived_at,
         })
 
-    # Order by scheduled start time so the driver sees their day in order
     result.sort(key=lambda r: r["window_start"] or "")
     return result
 
@@ -114,12 +189,22 @@ def start_trip(
     if trip.status != "scheduled":
         raise HTTPException(status_code=400, detail=f"Trip is already {trip.status}")
 
+    other_in_progress = db.query(models.Trip).filter(
+        models.Trip.van_id == van.id,
+        models.Trip.id != trip.id,
+        models.Trip.status == "in_progress",
+    ).first()
+    if other_in_progress:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Finish your current {other_in_progress.trip_type} trip before starting this one"
+        )
+
     trip.status = "in_progress"
     trip.started_at = datetime.utcnow()
+    _log_event(db, van, trip.id, "trip_started")
     db.commit()
 
-    # Notification hook point for Stage 3: every student on this trip
-    # should get a "route started" push here, once Firebase is wired in.
     logger.info(f"Driver {current_user.id} started trip {trip_id} ({trip.trip_type})")
     return {"message": f"{trip.trip_type.capitalize()} trip started"}
 
@@ -136,6 +221,7 @@ def complete_trip(
         raise HTTPException(status_code=400, detail=f"Trip is not in progress (currently {trip.status})")
 
     trip.status = "completed"
+    _log_event(db, van, trip.id, "trip_completed")
     db.commit()
     logger.info(f"Driver {current_user.id} completed trip {trip_id} ({trip.trip_type})")
     return {"message": f"{trip.trip_type.capitalize()} trip marked completed"}
@@ -217,9 +303,34 @@ def pick_student(
         raise HTTPException(status_code=400, detail=f"Student status is {student.status}")
 
     student.status = "picked"
+    _log_event(db, van, trip.id, "picked", student_id=student.id)
     db.commit()
     logger.info(f"Driver {current_user.id} picked student {student_id}")
     return {"message": "Student picked successfully"}
+
+
+@router.post("/no-show/{student_id}", response_model=schemas.MessageResponse)
+def no_show_student(
+    student_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_driver)
+):
+    van = get_driver_van(current_user.id, db)
+    student = db.query(models.Student).filter(models.Student.id == student_id).first()
+    if not student or not student.pickup_trip_id:
+        raise HTTPException(status_code=404, detail="Student not found or has no pickup trip")
+
+    trip = db.query(models.Trip).filter(models.Trip.id == student.pickup_trip_id).first()
+    if not trip or trip.van_id != van.id:
+        raise HTTPException(status_code=403, detail="Student not on your van's trip")
+    if student.status != "assigned":
+        raise HTTPException(status_code=400, detail=f"Student status is {student.status}")
+
+    student.status = "no_show"
+    _log_event(db, van, trip.id, "no_show", student_id=student.id)
+    db.commit()
+    logger.info(f"Driver {current_user.id} marked student {student_id} as no-show")
+    return {"message": "Student marked as no-show"}
 
 
 @router.post("/drop/{student_id}", response_model=schemas.MessageResponse)
@@ -240,6 +351,7 @@ def drop_student(
         raise HTTPException(status_code=400, detail=f"Student status is {student.status}")
 
     student.status = "dropped"
+    _log_event(db, van, trip.id, "dropped", student_id=student.id)
     db.commit()
     logger.info(f"Driver {current_user.id} dropped student {student_id}")
     return {"message": "Student dropped successfully"}
@@ -251,14 +363,11 @@ def notify_arrival(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_driver)
 ):
-    """
-    One alert to everyone on this specific trip: 'van has arrived, come
-    outside'. Fires once, for the whole trip, not per student.
-    """
     van = get_driver_van(current_user.id, db)
     trip = get_trip_for_van(trip_id, van.id, db)
 
     trip.arrived_at = datetime.utcnow()
+    _log_event(db, van, trip.id, "arrived")
     db.commit()
 
     if trip.trip_type == "pickup":
@@ -266,8 +375,6 @@ def notify_arrival(
     else:
         students = db.query(models.Student).filter(models.Student.drop_trip_id == trip.id).all()
 
-    # Notification hook point for Stage 3: send one push to every student
-    # in `students` here, once Firebase is wired in. For now, just logged.
     notified = [s.id for s in students if s.device_token]
     logger.info(f"Arrival notification for trip {trip_id}: would notify students {notified}")
     return {"message": f"Arrival marked, {len(notified)} students would be notified"}

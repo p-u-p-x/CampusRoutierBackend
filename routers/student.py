@@ -12,6 +12,16 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/student", tags=["Student"])
 
 
+def _format_12h(time_str: str) -> str:
+    """'14:00' -> '2:00 PM', '06:30' -> '6:30 AM'"""
+    hour, minute = map(int, time_str.split(":"))
+    period = "AM" if hour < 12 else "PM"
+    display_hour = hour % 12
+    if display_hour == 0:
+        display_hour = 12
+    return f"{display_hour}:{minute:02d} {period}"
+
+
 @router.get("/van-location", response_model=schemas.VanLocationResponse)
 def van_location(
     db: Session = Depends(get_db),
@@ -50,12 +60,6 @@ def get_drop_windows(
 
 
 def _window_has_passed(window_start_time: str) -> bool:
-    """
-    A window's cutoff is its own start time, today.
-    NOTE: this compares against the server's local clock. Once deployed,
-    this needs to compare against Pakistan time specifically, flagged
-    for Stage 5 (deployment) so it isn't silently wrong once hosted.
-    """
     today = date.today()
     hour, minute = map(int, window_start_time.split(":"))
     window_dt = datetime.combine(today, datetime.min.time()).replace(hour=hour, minute=minute)
@@ -98,8 +102,6 @@ def request_transport(
     if _window_has_passed(drop_window.start_time):
         raise HTTPException(status_code=400, detail="That drop time has already started, choose a later one")
 
-    # Just record what the student wants. The admin's automatic
-    # assignment step (Stage 2c) is what actually puts them on a van.
     student.pickup_window_id = request_data.pickup_window_id
     student.drop_window_id = request_data.drop_window_id
     student.pickup_trip_id = None
@@ -128,14 +130,15 @@ def my_status(
 
     pickup_window_str = None
     if student.pickup_window:
-        pickup_window_str = f"{student.pickup_window.start_time}-{student.pickup_window.end_time}"
+        pickup_window_str = f"{_format_12h(student.pickup_window.start_time)} - {_format_12h(student.pickup_window.end_time)}"
     drop_window_str = None
     if student.drop_window:
-        drop_window_str = f"{student.drop_window.start_time}-{student.drop_window.end_time}"
+        drop_window_str = f"{_format_12h(student.drop_window.start_time)} - {_format_12h(student.drop_window.end_time)}"
 
     return {
         "status": student.status,
         "area": student.area,
+        "name": student.name,
         "van_id": student.van_id,
         "van_number": van.name if van else None,
         "driver_name": van.driver.username if van and van.driver else None,
@@ -174,10 +177,10 @@ def today_route(
 
     pickup_str = None
     if student.pickup_trip and student.pickup_trip.pickup_window:
-        pickup_str = student.pickup_trip.pickup_window.start_time
+        pickup_str = _format_12h(student.pickup_trip.pickup_window.start_time)
     drop_str = None
     if student.drop_trip and student.drop_trip.drop_window:
-        drop_str = student.drop_trip.drop_window.start_time
+        drop_str = _format_12h(student.drop_trip.drop_window.start_time)
 
     return {"pickup_start_time": pickup_str, "drop_start_time": drop_str}
 

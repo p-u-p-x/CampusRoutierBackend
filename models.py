@@ -11,7 +11,7 @@ class User(Base):
     username = Column(String, unique=True, index=True, nullable=False)
     email = Column(String, unique=True, index=True, nullable=False)
     hashed_password = Column(String, nullable=False)
-    role = Column(String, nullable=False)  # "admin", "driver", "student"
+    role = Column(String, nullable=False)
     student_id = Column(Integer, ForeignKey("students.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -26,19 +26,17 @@ class Student(Base):
     name = Column(String)
     email = Column(String, unique=True, index=True)
     roll_number = Column(String, unique=True, index=True, nullable=False)
-    area = Column(String)  # DHA, Walton, Ali Park, Punjab Society, Cavalry, Bhata Chowk
+    area = Column(String)
     pickup_address = Column(String, nullable=True)
     drop_address = Column(String, nullable=True)
-    class_slot = Column(String, nullable=True)  # e.g. "Morning", "Afternoon"
-    device_token = Column(String, nullable=True)  # FCM token
-    status = Column(String, default="waiting")  # waiting, requested, assigned, picked, dropped
+    class_slot = Column(String, nullable=True)
+    device_token = Column(String, nullable=True)
+    status = Column(String, default="waiting")  # waiting, requested, assigned, picked, no_show, dropped
     pickup_window_id = Column(Integer, ForeignKey("pickup_windows.id"), nullable=True)
     drop_window_id = Column(Integer, ForeignKey("drop_windows.id"), nullable=True)
     pickup_order = Column(Integer, nullable=True)
     request_date = Column(Date, nullable=True)
     van_id = Column(Integer, ForeignKey("vans.id"), nullable=True)
-
-    # New: which specific van trip this student actually landed on today
     pickup_trip_id = Column(Integer, ForeignKey("trips.id"), nullable=True)
     drop_trip_id = Column(Integer, ForeignKey("trips.id"), nullable=True)
 
@@ -57,7 +55,7 @@ class Van(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String)
     capacity = Column(Integer)
-    areas = Column(String)  # comma separated areas
+    areas = Column(String)
     is_active = Column(Boolean, default=True)
     driver_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     current_lat = Column(Float, nullable=True)
@@ -72,7 +70,7 @@ class PickupWindow(Base):
     __tablename__ = "pickup_windows"
 
     id = Column(Integer, primary_key=True, index=True)
-    start_time = Column(String, nullable=False)  # format "HH:MM"
+    start_time = Column(String, nullable=False)
     end_time = Column(String, nullable=False)
     enabled = Column(Boolean, default=True)
 
@@ -120,23 +118,39 @@ class SystemSetting(Base):
 
 
 class Trip(Base):
-    """
-    One specific run: one van, one date, one direction (pickup or drop),
-    at one scheduled time. Lets a single van make several separate pickup
-    and drop runs in the same day, each tracked and capacity checked on its own.
-    """
     __tablename__ = "trips"
 
     id = Column(Integer, primary_key=True, index=True)
     van_id = Column(Integer, ForeignKey("vans.id"), nullable=False)
     trip_date = Column(Date, nullable=False, default=date.today)
-    trip_type = Column(String, nullable=False)  # "pickup" or "drop"
+    trip_type = Column(String, nullable=False)
     pickup_window_id = Column(Integer, ForeignKey("pickup_windows.id"), nullable=True)
     drop_window_id = Column(Integer, ForeignKey("drop_windows.id"), nullable=True)
-    status = Column(String, default="scheduled")  # scheduled, in_progress, completed
+    status = Column(String, default="scheduled")
     started_at = Column(DateTime, nullable=True)
     arrived_at = Column(DateTime, nullable=True)
 
     van = relationship("Van", foreign_keys=[van_id])
     pickup_window = relationship("PickupWindow", foreign_keys=[pickup_window_id])
     drop_window = relationship("DropWindow", foreign_keys=[drop_window_id])
+
+
+class StopEvent(Base):
+    """
+    A permanent log of everything that happens on a trip: it starting,
+    each student being picked, dropped, or marked no-show, and arrival
+    at uni. This is the real data trail for analysis later - never
+    edited or deleted, only added to.
+    """
+    __tablename__ = "stop_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    trip_id = Column(Integer, ForeignKey("trips.id"), nullable=False)
+    student_id = Column(Integer, ForeignKey("students.id"), nullable=True)  # null for trip-level events
+    event_type = Column(String, nullable=False)  # trip_started, picked, dropped, no_show, arrived, trip_completed
+    latitude = Column(Float, nullable=True)   # van's last known position at the time
+    longitude = Column(Float, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    trip = relationship("Trip", foreign_keys=[trip_id])
+    student = relationship("Student", foreign_keys=[student_id])
