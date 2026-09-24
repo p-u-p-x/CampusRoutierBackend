@@ -9,21 +9,26 @@ from datetime import date
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 
+def _issue_tokens(user: models.User) -> dict:
+    access_token = auth.create_access_token(
+        data={"sub": user.username, "role": user.role, "student_id": user.student_id}
+    )
+    refresh_token = auth.create_refresh_token(data={"sub": user.username})
+    return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer", "role": user.role}
+
+
 @router.post("/register", response_model=schemas.UserResponse)
 def register(user_data: schemas.StudentCreate, db: Session = Depends(auth.get_db)):
-    # Check if roll number or email already has an account
     existing = db.query(models.User).filter(
         (models.User.username == user_data.roll_number) | (models.User.email == user_data.email)
     ).first()
     if existing:
-        raise HTTPException(status_code=400, detail="Roll number or email already registered")
+        raise HTTPException(status_code=400, detail="Username or email already registered")
 
-    # Validate area
     allowed_areas = ["DHA", "Walton", "Ali Park", "Punjab Society", "Cavalry", "Bhata Chowk"]
     if user_data.area not in allowed_areas:
         raise HTTPException(status_code=400, detail=f"Area must be one of {allowed_areas}")
 
-    # Create student record
     student = models.Student(
         name=user_data.name,
         email=user_data.email,
@@ -35,12 +40,11 @@ def register(user_data: schemas.StudentCreate, db: Session = Depends(auth.get_db
         status="waiting"
     )
     db.add(student)
-    db.flush()  # get student.id
+    db.flush()
 
-    # Create user record with password = roll_number
-    hashed = auth.get_password_hash(user_data.roll_number)  # use roll_number as password
+    hashed = auth.get_password_hash(user_data.roll_number)
     db_user = models.User(
-        username=user_data.roll_number,  # username = roll_number
+        username=user_data.roll_number,
         email=user_data.email,
         hashed_password=hashed,
         role="student",
@@ -54,7 +58,6 @@ def register(user_data: schemas.StudentCreate, db: Session = Depends(auth.get_db
 
 @router.post("/student-register", response_model=schemas.UserResponse)
 def student_register(student_data: schemas.StudentRegister, db: Session = Depends(auth.get_db)):
-    # Convert to StudentCreate
     user_data = schemas.StudentCreate(
         name=student_data.name,
         email=student_data.email,
@@ -64,7 +67,7 @@ def student_register(student_data: schemas.StudentRegister, db: Session = Depend
         drop_address=student_data.drop_address,
         class_slot=student_data.class_slot,
         status="waiting",
-        password=student_data.roll_number  # password is roll_number
+        password=student_data.roll_number
     )
     return register(user_data, db)
 
@@ -78,7 +81,21 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    access_token = auth.create_access_token(
-        data={"sub": user.username, "role": user.role, "student_id": user.student_id}
-    )
-    return {"access_token": access_token, "token_type": "bearer", "role": user.role}
+    return _issue_tokens(user)
+
+
+@router.post("/refresh", response_model=schemas.Token)
+def refresh(request: schemas.RefreshRequest, db: Session = Depends(auth.get_db)):
+    """
+    Called silently by the app when an access token has expired. Trades
+    a still-valid refresh token for a brand new pair of tokens, no
+    username or password needed. This is what makes the app stay
+    logged in without the user noticing anything.
+    """
+    username = auth.decode_refresh_token(request.refresh_token)
+    if username is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired refresh token, please log in again")
+    user = db.query(models.User).filter(models.User.username == username).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="User no longer exists")
+    return _issue_tokens(user)

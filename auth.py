@@ -13,6 +13,7 @@ from database import SessionLocal
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-here")  # CHANGE IN PRODUCTION!
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
+REFRESH_TOKEN_EXPIRE_DAYS = 30
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
@@ -29,19 +30,43 @@ def get_password_hash(password: str) -> str:
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()
     expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
-    to_encode.update({"exp": expire})
+    to_encode.update({"exp": expire, "type": "access"})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def create_refresh_token(data: dict) -> str:
+    """
+    Long lived token, only ever used to silently get a new access token.
+    Never sent with normal requests, only to /auth/refresh.
+    """
+    to_encode = {"sub": data["sub"]}  # deliberately minimal, just enough to identify the user
+    expire = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    to_encode.update({"exp": expire, "type": "refresh"})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
 def decode_token(token: str) -> Optional[schemas.TokenData]:
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("type") != "access":
+            return None
         username = payload.get("sub")
         role = payload.get("role")
         student_id = payload.get("student_id")
         if username is None or role is None:
             return None
         return schemas.TokenData(username=username, role=role, student_id=student_id)
+    except JWTError:
+        return None
+
+
+def decode_refresh_token(token: str) -> Optional[str]:
+    """Returns the username if the refresh token is valid, else None."""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("type") != "refresh":
+            return None
+        return payload.get("sub")
     except JWTError:
         return None
 

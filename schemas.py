@@ -38,8 +38,13 @@ class UserMinimal(BaseModel):
 # ---------- Token ----------
 class Token(BaseModel):
     access_token: str
+    refresh_token: str
     token_type: str
     role: str
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
 
 
 class TokenData(BaseModel):
@@ -89,6 +94,7 @@ class StudentResponse(StudentBase):
 class StudentStatusResponse(BaseModel):
     status: str
     area: str
+    name: Optional[str] = None
     van_id: Optional[int] = None
     van_number: Optional[str] = None
     driver_name: Optional[str] = None
@@ -188,10 +194,10 @@ class DriverVanResponse(BaseModel):
 
 class TripResponse(BaseModel):
     id: int
-    trip_type: str  # "pickup" or "drop"
+    trip_type: str
     window_start: Optional[str] = None
     window_end: Optional[str] = None
-    status: str  # scheduled, in_progress, completed
+    status: str
     student_count: int
     started_at: Optional[datetime] = None
     arrived_at: Optional[datetime] = None
@@ -210,7 +216,7 @@ class DriverTripStudent(BaseModel):
 
 # ---------- Daily Route ----------
 class DailyRouteResponse(BaseModel):
-    pickup_start_time: Optional[str] = None  # formatted as "h:mm AM/PM"
+    pickup_start_time: Optional[str] = None
     drop_start_time: Optional[str] = None
 
 
