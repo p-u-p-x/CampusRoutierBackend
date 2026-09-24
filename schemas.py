@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, model_validator
 from typing import Optional, List
 from datetime import datetime, date, time
 
@@ -70,9 +70,6 @@ class StudentCreate(StudentBase):
 
 
 class StudentRegister(BaseModel):
-    """What a student actually submits at signup. roll_number must
-    already be on the roster. password is chosen by the student,
-    never derived from anything predictable."""
     name: str
     email: EmailStr
     roll_number: str
@@ -113,8 +110,18 @@ class StudentStatusResponse(BaseModel):
 
 
 class StudentRequest(BaseModel):
-    pickup_window_id: int
-    drop_window_id: int
+    """
+    Pickup and drop are now independent. A student can submit just one,
+    the other later, or both together. At least one must be present.
+    """
+    pickup_window_id: Optional[int] = None
+    drop_window_id: Optional[int] = None
+
+    @model_validator(mode="after")
+    def at_least_one_window(self):
+        if self.pickup_window_id is None and self.drop_window_id is None:
+            raise ValueError("Select at least a pickup window or a drop window")
+        return self
 
 
 class UpdateAddressRequest(BaseModel):
@@ -252,17 +259,3 @@ class VanUtilization(BaseModel):
 
 class AssignmentResult(BaseModel):
     assigned_count: int
-    vans_utilization: List[VanUtilization]
-
-
-# ---------- Live location ----------
-class LocationUpdate(BaseModel):
-    latitude: float
-    longitude: float
-
-
-class VanLocationResponse(BaseModel):
-    van_id: int
-    latitude: Optional[float] = None
-    longitude: Optional[float] = None
-    updated_at: Optional[datetime] = None

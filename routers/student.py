@@ -13,7 +13,6 @@ router = APIRouter(prefix="/student", tags=["Student"])
 
 
 def _format_12h(time_str: str) -> str:
-    """'14:00' -> '2:00 PM', '06:30' -> '6:30 AM'"""
     hour, minute = map(int, time_str.split(":"))
     period = "AM" if hour < 12 else "PM"
     display_hour = hour % 12
@@ -81,38 +80,50 @@ def request_transport(
         raise HTTPException(status_code=404, detail="Student not found")
 
     today = date.today()
-    if student.request_date == today and student.status != "waiting":
-        raise HTTPException(status_code=400, detail="You have already requested transport today")
+    confirmed_parts = []
 
-    pickup_window = db.query(models.PickupWindow).filter(
-        models.PickupWindow.id == request_data.pickup_window_id,
-        models.PickupWindow.enabled == True
-    ).first()
-    if not pickup_window:
-        raise HTTPException(status_code=400, detail="Invalid or disabled pickup window")
-    if _window_has_passed(pickup_window.start_time):
-        raise HTTPException(status_code=400, detail="That pickup time has already started, choose a later one")
+    # Pickup side - independent of drop, its own cutoff, its own lock
+    # once a real van trip has actually been assigned to it.
+    if request_data.pickup_window_id is not None:
+        if student.pickup_trip_id is not None and student.request_date == today:
+            raise HTTPException(status_code=400, detail="Your pickup has already been assigned to a van today")
 
-    drop_window = db.query(models.DropWindow).filter(
-        models.DropWindow.id == request_data.drop_window_id,
-        models.DropWindow.enabled == True
-    ).first()
-    if not drop_window:
-        raise HTTPException(status_code=400, detail="Invalid or disabled drop window")
-    if _window_has_passed(drop_window.start_time):
-        raise HTTPException(status_code=400, detail="That drop time has already started, choose a later one")
+        pickup_window = db.query(models.PickupWindow).filter(
+            models.PickupWindow.id == request_data.pickup_window_id,
+            models.PickupWindow.enabled == True
+        ).first()
+        if not pickup_window:
+            raise HTTPException(status_code=400, detail="Invalid or disabled pickup window")
+        if _window_has_passed(pickup_window.start_time):
+            raise HTTPException(status_code=400, detail="That pickup time has already started, choose a later one")
 
-    student.pickup_window_id = request_data.pickup_window_id
-    student.drop_window_id = request_data.drop_window_id
-    student.pickup_trip_id = None
-    student.drop_trip_id = None
-    student.van_id = None
-    student.status = "requested"
+        student.pickup_window_id = request_data.pickup_window_id
+        confirmed_parts.append("pickup")
+
+    # Drop side - same idea, fully independent
+    if request_data.drop_window_id is not None:
+        if student.drop_trip_id is not None and student.request_date == today:
+            raise HTTPException(status_code=400, detail="Your drop has already been assigned to a van today")
+
+        drop_window = db.query(models.DropWindow).filter(
+            models.DropWindow.id == request_data.drop_window_id,
+            models.DropWindow.enabled == True
+        ).first()
+        if not drop_window:
+            raise HTTPException(status_code=400, detail="Invalid or disabled drop window")
+        if _window_has_passed(drop_window.start_time):
+            raise HTTPException(status_code=400, detail="That drop time has already started, choose a later one")
+
+        student.drop_window_id = request_data.drop_window_id
+        confirmed_parts.append("drop")
+
+    if student.status == "waiting":
+        student.status = "requested"
     student.request_date = today
     db.commit()
 
-    logger.info(f"Student {student.id} requested pickup window {pickup_window.id}, drop window {drop_window.id}")
-    return {"message": "Transport request submitted successfully"}
+    logger.info(f"Student {student.id} requested: {', '.join(confirmed_parts)}")
+    return {"message": f"{' and '.join(confirmed_parts).capitalize()} request submitted successfully"}
 
 
 @router.get("/my-status", response_model=schemas.StudentStatusResponse)
