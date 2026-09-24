@@ -66,10 +66,13 @@ class StudentBase(BaseModel):
 
 
 class StudentCreate(StudentBase):
-    password: str  # for registration, will be set to roll_number
+    password: str
 
 
 class StudentRegister(BaseModel):
+    """What a student actually submits at signup. roll_number must
+    already be on the roster. password is chosen by the student,
+    never derived from anything predictable."""
     name: str
     email: EmailStr
     roll_number: str
@@ -77,6 +80,7 @@ class StudentRegister(BaseModel):
     pickup_address: str
     drop_address: str
     class_slot: str
+    password: str
 
 
 class StudentResponse(StudentBase):
@@ -116,6 +120,25 @@ class StudentRequest(BaseModel):
 class UpdateAddressRequest(BaseModel):
     pickup_address: str
     drop_address: str
+
+
+# ---------- Roster ----------
+class RosterEntryAdd(BaseModel):
+    roll_number: str
+    name: Optional[str] = None
+
+
+class RosterBulkAdd(BaseModel):
+    entries: List[RosterEntryAdd]
+
+
+class RosterEntryResponse(BaseModel):
+    id: int
+    roll_number: str
+    name: Optional[str] = None
+    used: bool
+
+    model_config = {"from_attributes": True}
 
 
 # ---------- Van ----------

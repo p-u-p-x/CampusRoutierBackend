@@ -1,5 +1,5 @@
 from database import SessionLocal, engine
-from models import Base, Student, Van, DropWindow, PickupWindow, User, SystemSetting, DailyRoute, Assignment, Trip
+from models import Base, Student, Van, DropWindow, PickupWindow, User, SystemSetting, DailyRoute, Assignment, Trip, RosterEntry
 from auth import get_password_hash
 from datetime import date, time
 
@@ -22,25 +22,30 @@ db.query(DropWindow).delete()
 db.query(PickupWindow).delete()
 db.query(User).delete()
 db.query(SystemSetting).delete()
+db.query(RosterEntry).delete()
 db.commit()
 
-# Pickup windows: van departs home at this time, heading to the matching class
+# Pickup windows: van departs home at start_time, must deliver students
+# to campus by end_time, which is when their class starts.
 pickup_windows = [
-    PickupWindow(start_time="06:30", end_time="06:45", enabled=True),  # for 8:00 class
-    PickupWindow(start_time="08:00", end_time="08:15", enabled=True),  # for 9:30 class
-    PickupWindow(start_time="09:00", end_time="09:15", enabled=True),  # for 11:00 class
-    PickupWindow(start_time="12:00", end_time="12:15", enabled=True),  # for 2:00 class
+    PickupWindow(start_time="06:30", end_time="08:00", enabled=True),  # for 8:00 class
+    PickupWindow(start_time="08:00", end_time="09:30", enabled=True),  # for 9:30 class
+    PickupWindow(start_time="09:00", end_time="11:00", enabled=True),  # for 11:00 class
+    PickupWindow(start_time="12:00", end_time="14:00", enabled=True),  # for 2:00 class
 ]
 db.add_all(pickup_windows)
 db.commit()
 
-# Drop windows: van waits at uni around this time, heading home
+# Drop windows: van waits at campus from start_time, picks up whoever's
+# ready, and heads home. end_time is when the van needs to be free again,
+# either for the next drop trip or, for the 11:00 drop, the day's last
+# pickup route at 12:00 - not a hard 15 minute slot like pickup windows.
 drop_windows = [
-    DropWindow(start_time="11:00", end_time="11:20", enabled=True),  # for 10:45 class end
-    DropWindow(start_time="14:00", end_time="14:20", enabled=True),  # for 1:45 class end
-    DropWindow(start_time="15:30", end_time="15:50", enabled=True),  # for 3:15 class end
-    DropWindow(start_time="17:00", end_time="17:20", enabled=True),  # for 4:45 class end
-    DropWindow(start_time="18:30", end_time="18:50", enabled=True),  # for 6:15 class end
+    DropWindow(start_time="11:00", end_time="12:00", enabled=True),  # for 10:45 class end, frees van for 12:00 pickup
+    DropWindow(start_time="14:00", end_time="15:30", enabled=True),  # for 1:45 class end
+    DropWindow(start_time="15:30", end_time="17:00", enabled=True),  # for 3:15 class end
+    DropWindow(start_time="17:00", end_time="18:30", enabled=True),  # for 4:45 class end
+    DropWindow(start_time="18:30", end_time="19:30", enabled=True),  # for 6:15 class end, last trip of the day
 ]
 db.add_all(drop_windows)
 db.commit()
@@ -57,7 +62,9 @@ db.commit()
 
 areas = ["DHA", "Walton", "Ali Park", "Punjab Society", "Cavalry", "Bhata Chowk"]
 
-# Create 15 students with associated user accounts
+# Create 15 students with associated user accounts.
+# These are test accounts created directly, bypassing registration
+# entirely, so they don't touch the roster at all - that's expected.
 students = []
 for i in range(1, 16):
     area = areas[(i - 1) % len(areas)]
@@ -115,6 +122,16 @@ settings = [
 db.add_all(settings)
 db.commit()
 
+# A few roster entries for testing real self-registration.
+# STU001 through STU015 already exist as full accounts above and don't
+# need this; these are for testing NEW signups going through the roster.
+roster_entries = [
+    RosterEntry(roll_number="STU016", name="Test Roster Student 1"),
+    RosterEntry(roll_number="STU017", name="Test Roster Student 2"),
+]
+db.add_all(roster_entries)
+db.commit()
+
 # Create today's trips: every active van runs every pickup and drop window
 today = date.today()
 for van in vans:
@@ -126,4 +143,4 @@ db.commit()
 
 db.close()
 
-print("Clean test data inserted, with real schedule windows and today's trips.")
+print("Clean test data inserted, with real schedule windows, roster entries, and today's trips.")

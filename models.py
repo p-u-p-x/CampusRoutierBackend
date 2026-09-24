@@ -31,7 +31,7 @@ class Student(Base):
     drop_address = Column(String, nullable=True)
     class_slot = Column(String, nullable=True)
     device_token = Column(String, nullable=True)
-    status = Column(String, default="waiting")  # waiting, requested, assigned, picked, no_show, dropped
+    status = Column(String, default="waiting")
     pickup_window_id = Column(Integer, ForeignKey("pickup_windows.id"), nullable=True)
     drop_window_id = Column(Integer, ForeignKey("drop_windows.id"), nullable=True)
     pickup_order = Column(Integer, nullable=True)
@@ -136,21 +136,30 @@ class Trip(Base):
 
 
 class StopEvent(Base):
-    """
-    A permanent log of everything that happens on a trip: it starting,
-    each student being picked, dropped, or marked no-show, and arrival
-    at uni. This is the real data trail for analysis later - never
-    edited or deleted, only added to.
-    """
     __tablename__ = "stop_events"
 
     id = Column(Integer, primary_key=True, index=True)
     trip_id = Column(Integer, ForeignKey("trips.id"), nullable=False)
-    student_id = Column(Integer, ForeignKey("students.id"), nullable=True)  # null for trip-level events
-    event_type = Column(String, nullable=False)  # trip_started, picked, dropped, no_show, arrived, trip_completed
-    latitude = Column(Float, nullable=True)   # van's last known position at the time
+    student_id = Column(Integer, ForeignKey("students.id"), nullable=True)
+    event_type = Column(String, nullable=False)
+    latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     trip = relationship("Trip", foreign_keys=[trip_id])
     student = relationship("Student", foreign_keys=[student_id])
+
+
+class RosterEntry(Base):
+    """
+    The list of roll numbers the admin has actually approved to register.
+    A roll number not in here cannot sign up at all. Once used, it's
+    locked, so nobody else can ever claim that same roll number.
+    """
+    __tablename__ = "roster_entries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    roll_number = Column(String, unique=True, index=True, nullable=False)
+    name = Column(String, nullable=True)  # admin's own reference, optional
+    used = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)

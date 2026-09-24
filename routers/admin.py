@@ -272,6 +272,48 @@ def toggle_pickup_window(
     db.commit()
     return {"open": new_value.lower() == "true"}
 
+@router.post("/roster/add", response_model=schemas.RosterEntryResponse)
+def add_to_roster(
+    entry: schemas.RosterEntryAdd,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin)
+):
+    existing = db.query(models.RosterEntry).filter(models.RosterEntry.roll_number == entry.roll_number).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="That roll number is already on the roster")
+    roster_entry = models.RosterEntry(roll_number=entry.roll_number, name=entry.name)
+    db.add(roster_entry)
+    db.commit()
+    db.refresh(roster_entry)
+    return roster_entry
+
+
+@router.post("/roster/bulk", response_model=list[schemas.RosterEntryResponse])
+def add_to_roster_bulk(
+    payload: schemas.RosterBulkAdd,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin)
+):
+    added = []
+    for entry in payload.entries:
+        existing = db.query(models.RosterEntry).filter(models.RosterEntry.roll_number == entry.roll_number).first()
+        if existing:
+            continue  # skip ones already on the roster, don't fail the whole batch
+        roster_entry = models.RosterEntry(roll_number=entry.roll_number, name=entry.name)
+        db.add(roster_entry)
+        added.append(roster_entry)
+    db.commit()
+    for r in added:
+        db.refresh(r)
+    return added
+
+
+@router.get("/roster", response_model=list[schemas.RosterEntryResponse])
+def get_roster(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin)
+):
+    return db.query(models.RosterEntry).all()
 
 @router.post("/assign-driver", response_model=schemas.VanResponse)
 def assign_driver(

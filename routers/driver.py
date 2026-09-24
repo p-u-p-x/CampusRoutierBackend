@@ -8,6 +8,7 @@ from auth import get_db, require_driver
 from datetime import datetime, date
 import logging
 import math
+from firebase_service import send_push
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +35,6 @@ def get_trip_for_van(trip_id: int, van_id: int, db: Session) -> models.Trip:
 
 
 def _log_event(db: Session, van: models.Van, trip_id: int, event_type: str, student_id: int = None):
-    """Every important thing that happens gets one permanent row here,
-    tagged with the van's last known GPS position at that moment."""
     event = models.StopEvent(
         trip_id=trip_id,
         student_id=student_id,
@@ -47,8 +46,7 @@ def _log_event(db: Session, van: models.Van, trip_id: int, event_type: str, stud
 
 
 def _distance_meters(lat1, lon1, lat2, lon2) -> float:
-    """Straight-line distance between two GPS points, in meters."""
-    R = 6371000  # Earth's radius in meters
+    R = 6371000
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
     dlambda = math.radians(lon2 - lon1)
@@ -64,13 +62,6 @@ def _window_time_passed(window_start_time: str) -> bool:
 
 
 def _maybe_auto_start_trip(db: Session, van: models.Van, prev_lat, prev_lng, new_lat, new_lng):
-    """
-    If the van has no trip in progress right now, and it has moved more
-    than MOVEMENT_THRESHOLD_METERS since its last reported position, and
-    today's next scheduled trip's window has already begun, automatically
-    mark that trip started. This is the 'trip starts when the van actually
-    starts moving' behavior, no button press needed.
-    """
     already_in_progress = db.query(models.Trip).filter(
         models.Trip.van_id == van.id,
         models.Trip.status == "in_progress",
@@ -79,7 +70,7 @@ def _maybe_auto_start_trip(db: Session, van: models.Van, prev_lat, prev_lng, new
         return
 
     if prev_lat is None or prev_lng is None:
-        return  # first ever location report for this van, nothing to compare against
+        return
 
     moved = _distance_meters(prev_lat, prev_lng, new_lat, new_lng)
     if moved < MOVEMENT_THRESHOLD_METERS:
@@ -108,6 +99,23 @@ def _maybe_auto_start_trip(db: Session, van: models.Van, prev_lat, prev_lng, new
     trip_to_start.started_at = datetime.utcnow()
     _log_event(db, van, trip_to_start.id, "trip_started")
     logger.info(f"Auto-started trip {trip_to_start.id} for van {van.id} after {moved:.0f}m of movement")
+    _notify_trip_started(db, trip_to_start)
+
+
+def _notify_trip_started(db: Session, trip: models.Trip):
+    """Pushes 'route started' to every student on this trip."""
+    if trip.trip_type == "pickup":
+        students = db.query(models.Student).filter(models.Student.pickup_trip_id == trip.id).all()
+        title = "Van is on the way"
+        body = "Your pickup van has started its route."
+    else:
+        students = db.query(models.Student).filter(models.Student.drop_trip_id == trip.id).all()
+        title = "Drop route started"
+        body = "The van has started the drop route. Head to the van if you haven't already."
+
+    for s in students:
+        if s.device_token:
+            send_push(s.device_token, title, body, data={"trip_id": trip.id, "type": "trip_started"})
 
 
 @router.get("/my-van", response_model=schemas.DriverVanResponse)
@@ -204,6 +212,8 @@ def start_trip(
     trip.started_at = datetime.utcnow()
     _log_event(db, van, trip.id, "trip_started")
     db.commit()
+
+    _notify_trip_started(db, trip)
 
     logger.info(f"Driver {current_user.id} started trip {trip_id} ({trip.trip_type})")
     return {"message": f"{trip.trip_type.capitalize()} trip started"}
@@ -372,9 +382,19 @@ def notify_arrival(
 
     if trip.trip_type == "pickup":
         students = db.query(models.Student).filter(models.Student.pickup_trip_id == trip.id).all()
+        title = "Van has arrived"
+        body = "The van has reached uni. Come outside if you're heading home."
     else:
         students = db.query(models.Student).filter(models.Student.drop_trip_id == trip.id).all()
+        title = "Van has arrived"
+        body = "The van has reached uni and is waiting for drop-off riders."
 
-    notified = [s.id for s in students if s.device_token]
-    logger.info(f"Arrival notification for trip {trip_id}: would notify students {notified}")
-    return {"message": f"Arrival marked, {len(notified)} students would be notified"}
+    notified = 0
+    for s in students:
+        if s.device_token:
+            sent = send_push(s.device_token, title, body, data={"trip_id": trip.id, "type": "arrived"})
+            if sent:
+                notified += 1
+
+    logger.info(f"Arrival notification for trip {trip_id}: notified {notified} of {len(students)} students")
+    return {"message": f"Arrival marked, {notified} students notified"}

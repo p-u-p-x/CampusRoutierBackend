@@ -4,7 +4,6 @@ from sqlalchemy.orm import Session
 import models
 import schemas
 import auth
-from datetime import date
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -17,48 +16,36 @@ def _issue_tokens(user: models.User) -> dict:
     return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer", "role": user.role}
 
 
-@router.post("/register", response_model=schemas.UserResponse)
-def register(user_data: schemas.StudentCreate, db: Session = Depends(auth.get_db)):
-    existing = db.query(models.User).filter(
-        (models.User.username == user_data.roll_number) | (models.User.email == user_data.email)
-    ).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="Username or email already registered")
-
-    allowed_areas = ["DHA", "Walton", "Ali Park", "Punjab Society", "Cavalry", "Bhata Chowk"]
-    if user_data.area not in allowed_areas:
-        raise HTTPException(status_code=400, detail=f"Area must be one of {allowed_areas}")
-
-    student = models.Student(
-        name=user_data.name,
-        email=user_data.email,
-        roll_number=user_data.roll_number,
-        area=user_data.area,
-        pickup_address=user_data.pickup_address,
-        drop_address=user_data.drop_address,
-        class_slot=user_data.class_slot,
-        status="waiting"
-    )
-    db.add(student)
-    db.flush()
-
-    hashed = auth.get_password_hash(user_data.roll_number)
-    db_user = models.User(
-        username=user_data.roll_number,
-        email=user_data.email,
-        hashed_password=hashed,
-        role="student",
-        student_id=student.id
-    )
-    db.add(db_user)
-    db.commit()
-    db.refresh(db_user)
-    return db_user
-
-
 @router.post("/student-register", response_model=schemas.UserResponse)
 def student_register(student_data: schemas.StudentRegister, db: Session = Depends(auth.get_db)):
-    user_data = schemas.StudentCreate(
+    roster_entry = db.query(models.RosterEntry).filter(
+        models.RosterEntry.roll_number == student_data.roll_number
+    ).first()
+    if not roster_entry:
+        raise HTTPException(
+            status_code=400,
+            detail="This roll number is not on the approved list. Contact your admin to be added."
+        )
+    if roster_entry.used:
+        raise HTTPException(
+            status_code=400,
+            detail="This roll number has already been registered. If this wasn't you, contact your admin."
+        )
+
+    existing = db.query(models.User).filter(
+        (models.User.username == student_data.roll_number) | (models.User.email == student_data.email)
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Roll number or email already registered")
+
+    allowed_areas = ["DHA", "Walton", "Ali Park", "Punjab Society", "Cavalry", "Bhata Chowk"]
+    if student_data.area not in allowed_areas:
+        raise HTTPException(status_code=400, detail=f"Area must be one of {allowed_areas}")
+
+    if len(student_data.password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+
+    student = models.Student(
         name=student_data.name,
         email=student_data.email,
         roll_number=student_data.roll_number,
@@ -66,10 +53,26 @@ def student_register(student_data: schemas.StudentRegister, db: Session = Depend
         pickup_address=student_data.pickup_address,
         drop_address=student_data.drop_address,
         class_slot=student_data.class_slot,
-        status="waiting",
-        password=student_data.roll_number
+        status="waiting"
     )
-    return register(user_data, db)
+    db.add(student)
+    db.flush()
+
+    hashed = auth.get_password_hash(student_data.password)
+    db_user = models.User(
+        username=student_data.roll_number,
+        email=student_data.email,
+        hashed_password=hashed,
+        role="student",
+        student_id=student.id
+    )
+    db.add(db_user)
+
+    roster_entry.used = True
+
+    db.commit()
+    db.refresh(db_user)
+    return db_user
 
 
 @router.post("/login", response_model=schemas.Token)
@@ -86,12 +89,6 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 
 @router.post("/refresh", response_model=schemas.Token)
 def refresh(request: schemas.RefreshRequest, db: Session = Depends(auth.get_db)):
-    """
-    Called silently by the app when an access token has expired. Trades
-    a still-valid refresh token for a brand new pair of tokens, no
-    username or password needed. This is what makes the app stay
-    logged in without the user noticing anything.
-    """
     username = auth.decode_refresh_token(request.refresh_token)
     if username is None:
         raise HTTPException(status_code=401, detail="Invalid or expired refresh token, please log in again")
