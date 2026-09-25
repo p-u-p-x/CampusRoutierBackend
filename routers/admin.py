@@ -146,6 +146,8 @@ def run_assignment(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_admin)
 ):
+    today = date.today()
+    _apply_weekly_defaults(db, today)
     _ensure_todays_trips(db)
 
     pickup_assigned = _assign_side(db, "pickup")
@@ -307,6 +309,40 @@ def add_to_roster_bulk(
         db.refresh(r)
     return added
 
+def _apply_weekly_defaults(db: Session, target_date: date):
+    """
+    For any student who has a saved weekly default for target_date's
+    weekday, and who hasn't already made an explicit request for that
+    exact date, pulls their default in automatically. An explicit
+    request always wins - this only fills in students who did nothing.
+    """
+    day_name = target_date.strftime("%A")  # "Monday", "Tuesday", ...
+    defaults = db.query(models.WeeklyDefault).filter(models.WeeklyDefault.day_of_week == day_name).all()
+
+    applied = 0
+    for default in defaults:
+        student = db.query(models.Student).filter(models.Student.id == default.student_id).first()
+        if not student:
+            continue
+        # Skip anyone who's already explicitly planned this exact date
+        if student.request_date == target_date:
+            continue
+
+        if default.pickup_window_id:
+            student.pickup_window_id = default.pickup_window_id
+        if default.drop_window_id:
+            student.drop_window_id = default.drop_window_id
+        student.pickup_trip_id = None
+        student.drop_trip_id = None
+        student.van_id = None
+        student.pickup_order = None
+        student.status = "requested"
+        student.request_date = target_date
+        applied += 1
+
+    if applied:
+        db.commit()
+        logger.info(f"Applied {applied} weekly defaults for {day_name} ({target_date})")
 
 @router.get("/roster", response_model=list[schemas.RosterEntryResponse])
 def get_roster(

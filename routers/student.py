@@ -4,7 +4,7 @@ import models
 import schemas
 import auth
 from auth import get_db, require_student
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import logging
 
 logger = logging.getLogger(__name__)
@@ -58,7 +58,7 @@ def get_drop_windows(
     return windows
 
 
-def _window_has_passed(window_start_time: str) -> bool:
+def _window_has_passed_today(window_start_time: str) -> bool:
     today = date.today()
     hour, minute = map(int, window_start_time.split(":"))
     window_dt = datetime.combine(today, datetime.min.time()).replace(hour=hour, minute=minute)
@@ -79,14 +79,41 @@ def request_transport(
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
 
-    today = date.today()
+    target = date.today() if request_data.target_date == "today" else date.today() + timedelta(days=1)
+
+    # A fresh day's plan: if this request is for a different date than
+    # whatever the student currently has on file, start clean for that
+    # new date. Never touches an already-running assignment for the
+    # date that's still active.
+    if student.request_date != target:
+        student.pickup_window_id = None
+        student.drop_window_id = None
+        student.pickup_trip_id = None
+        student.drop_trip_id = None
+        student.van_id = None
+        student.pickup_order = None
+        if student.status not in ("picked", "dropped"):
+            student.status = "waiting"
+
     confirmed_parts = []
 
-    # Pickup side - independent of drop, its own cutoff, its own lock
-    # once a real van trip has actually been assigned to it.
     if request_data.pickup_window_id is not None:
-        if student.pickup_trip_id is not None and student.request_date == today:
-            raise HTTPException(status_code=400, detail="Your pickup has already been assigned to a van today")
+        # Changing a side that's already assigned to a real van is
+        # allowed, as long as that trip hasn't actually started yet.
+        # Once a driver taps Start Trip, the van may already be en
+        # route expecting this student, so it locks.
+        if student.pickup_trip_id is not None and student.request_date == target:
+            current_trip = db.query(models.Trip).filter(models.Trip.id == student.pickup_trip_id).first()
+            if current_trip and current_trip.status != "scheduled":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Your pickup route has already started, it's too late to change this one"
+                )
+            # Free up the old seat, this side goes back to being requested
+            student.pickup_trip_id = None
+            student.pickup_order = None
+            if student.drop_trip_id is None:
+                student.van_id = None  # only clear the shown van if drop isn't holding it too
 
         pickup_window = db.query(models.PickupWindow).filter(
             models.PickupWindow.id == request_data.pickup_window_id,
@@ -94,16 +121,21 @@ def request_transport(
         ).first()
         if not pickup_window:
             raise HTTPException(status_code=400, detail="Invalid or disabled pickup window")
-        if _window_has_passed(pickup_window.start_time):
-            raise HTTPException(status_code=400, detail="That pickup time has already started, choose a later one")
+        if target == date.today() and _window_has_passed_today(pickup_window.start_time):
+            raise HTTPException(status_code=400, detail="That pickup time has already started, choose a later one or select tomorrow")
 
         student.pickup_window_id = request_data.pickup_window_id
         confirmed_parts.append("pickup")
 
-    # Drop side - same idea, fully independent
     if request_data.drop_window_id is not None:
-        if student.drop_trip_id is not None and student.request_date == today:
-            raise HTTPException(status_code=400, detail="Your drop has already been assigned to a van today")
+        if student.drop_trip_id is not None and student.request_date == target:
+            current_trip = db.query(models.Trip).filter(models.Trip.id == student.drop_trip_id).first()
+            if current_trip and current_trip.status != "scheduled":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Your drop route has already started, it's too late to change this one"
+                )
+            student.drop_trip_id = None
 
         drop_window = db.query(models.DropWindow).filter(
             models.DropWindow.id == request_data.drop_window_id,
@@ -111,19 +143,22 @@ def request_transport(
         ).first()
         if not drop_window:
             raise HTTPException(status_code=400, detail="Invalid or disabled drop window")
-        if _window_has_passed(drop_window.start_time):
-            raise HTTPException(status_code=400, detail="That drop time has already started, choose a later one")
+        if target == date.today() and _window_has_passed_today(drop_window.start_time):
+            raise HTTPException(status_code=400, detail="That drop time has already started, choose a later one or select tomorrow")
 
         student.drop_window_id = request_data.drop_window_id
         confirmed_parts.append("drop")
 
-    if student.status == "waiting":
+    # If either side just got freed up above, the overall status needs
+    # to reflect that it's pending again, not still "assigned".
+    if student.status == "waiting" or student.status == "assigned":
         student.status = "requested"
-    student.request_date = today
+    student.request_date = target
     db.commit()
 
-    logger.info(f"Student {student.id} requested: {', '.join(confirmed_parts)}")
-    return {"message": f"{' and '.join(confirmed_parts).capitalize()} request submitted successfully"}
+    day_label = "today" if target == date.today() else "tomorrow"
+    logger.info(f"Student {student.id} requested {', '.join(confirmed_parts)} for {day_label}")
+    return {"message": f"{' and '.join(confirmed_parts).capitalize()} request updated for {day_label}"}
 
 
 @router.get("/my-status", response_model=schemas.StudentStatusResponse)
@@ -159,6 +194,7 @@ def my_status(
         "pickup_address": student.pickup_address,
         "drop_address": student.drop_address,
         "class_slot": student.class_slot,
+        "request_date": student.request_date,
     }
 
 

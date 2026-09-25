@@ -105,22 +105,27 @@ class StudentStatusResponse(BaseModel):
     pickup_address: Optional[str] = None
     drop_address: Optional[str] = None
     class_slot: Optional[str] = None
+    request_date: Optional[date] = None
 
     model_config = {"from_attributes": True}
 
 
 class StudentRequest(BaseModel):
     """
-    Pickup and drop are now independent. A student can submit just one,
-    the other later, or both together. At least one must be present.
+    Pickup and drop are independent, either or both may be submitted.
+    target_date is "today" or "tomorrow" - defaults to "today" if not
+    given, so older app versions keep working unchanged.
     """
     pickup_window_id: Optional[int] = None
     drop_window_id: Optional[int] = None
+    target_date: str = "today"
 
     @model_validator(mode="after")
     def at_least_one_window(self):
         if self.pickup_window_id is None and self.drop_window_id is None:
             raise ValueError("Select at least a pickup window or a drop window")
+        if self.target_date not in ("today", "tomorrow"):
+            raise ValueError("target_date must be 'today' or 'tomorrow'")
         return self
 
 
@@ -273,3 +278,21 @@ class VanLocationResponse(BaseModel):
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     updated_at: Optional[datetime] = None
+
+# ---------- Weekly defaults ----------
+class WeeklyDefaultDay(BaseModel):
+    day_of_week: str  # "Monday" through "Sunday"
+    pickup_window_id: Optional[int] = None
+    drop_window_id: Optional[int] = None
+
+
+class WeeklyDefaultsSet(BaseModel):
+    days: List[WeeklyDefaultDay]
+
+
+class WeeklyDefaultDayResponse(BaseModel):
+    day_of_week: str
+    pickup_window_id: Optional[int] = None
+    pickup_window: Optional[str] = None
+    drop_window_id: Optional[int] = None
+    drop_window: Optional[str] = None

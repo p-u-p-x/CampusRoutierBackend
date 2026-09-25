@@ -151,15 +151,31 @@ class StopEvent(Base):
 
 
 class RosterEntry(Base):
-    """
-    The list of roll numbers the admin has actually approved to register.
-    A roll number not in here cannot sign up at all. Once used, it's
-    locked, so nobody else can ever claim that same roll number.
-    """
     __tablename__ = "roster_entries"
 
     id = Column(Integer, primary_key=True, index=True)
     roll_number = Column(String, unique=True, index=True, nullable=False)
-    name = Column(String, nullable=True)  # admin's own reference, optional
+    name = Column(String, nullable=True)
     used = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class WeeklyDefault(Base):
+    """
+    A student's standing preference for one day of the week, e.g. every
+    Monday take the 8:00 pickup and 3:30 drop. Applied automatically
+    when assignment runs for that date, for any student who hasn't
+    explicitly requested that specific day - an explicit request for
+    that day always overrides this.
+    """
+    __tablename__ = "weekly_defaults"
+
+    id = Column(Integer, primary_key=True, index=True)
+    student_id = Column(Integer, ForeignKey("students.id"), nullable=False)
+    day_of_week = Column(String, nullable=False)  # "Monday", "Tuesday", ...
+    pickup_window_id = Column(Integer, ForeignKey("pickup_windows.id"), nullable=True)
+    drop_window_id = Column(Integer, ForeignKey("drop_windows.id"), nullable=True)
+
+    student = relationship("Student", foreign_keys=[student_id])
+    pickup_window = relationship("PickupWindow", foreign_keys=[pickup_window_id])
+    drop_window = relationship("DropWindow", foreign_keys=[drop_window_id])
